@@ -1,0 +1,49 @@
+{
+	"jobConfig": {
+		"name": "farhan_silver_fuel_transactions",
+		"description": "",
+		"role": "arn:aws:iam::537124955775:role/bootcamp-poc-farhan",
+		"command": "glueetl",
+		"version": "5.1",
+		"runtime": null,
+		"workerType": "G.1X",
+		"numberOfWorkers": 10,
+		"maxCapacity": 10,
+		"jobRunQueuingEnabled": false,
+		"maxRetries": 0,
+		"timeout": 480,
+		"maxConcurrentRuns": 1,
+		"security": "none",
+		"scriptName": "farhan_silver_fuel_transactions.py",
+		"scriptLocation": "s3://ttn-de-bootcamp-bronze-us-east-1/7002_mohammad_farhan_bronze/scripts/",
+		"language": "python-3",
+		"spark": true,
+		"sparkConfiguration": "standard",
+		"jobParameters": [
+			{
+				"key": "--conf",
+				"value": "spark.eventLog.rolling.enabled=true",
+				"existing": false
+			}
+		],
+		"tags": [],
+		"jobMode": "DEVELOPER_MODE",
+		"createdOn": "2026-05-05T10:15:29.435Z",
+		"developerMode": true,
+		"connectionsList": [],
+		"temporaryDirectory": "s3://ttn-de-bootcamp-bronze-us-east-1/7002_mohammad_farhan_bronze/temp_path/",
+		"logging": true,
+		"glueHiveMetastore": true,
+		"etlAutoTuning": true,
+		"metrics": true,
+		"observabilityMetrics": true,
+		"bookmark": "job-bookmark-disable",
+		"sparkPath": "s3://ttn-de-bootcamp-bronze-us-east-1/7002_mohammad_farhan_bronze/logs/",
+		"flexExecution": false,
+		"minFlexWorkers": null,
+		"maintenanceWindow": null
+	},
+	"hasBeenSaved": false,
+	"usageProfileName": null,
+	"script": "# FULL script inside Glue (not snippet)\n\nimport sys\nfrom pyspark.context import SparkContext\nfrom awsglue.context import GlueContext\nfrom awsglue.job import Job\nfrom awsglue.utils import getResolvedOptions\nfrom pyspark.sql.functions import *\n\nargs = getResolvedOptions(sys.argv, ['JOB_NAME'])\n\nsc = SparkContext()\nglueContext = GlueContext(sc)\nspark = glueContext.spark_session\njob = Job(glueContext)\njob.init(args['JOB_NAME'], args)\n\n# READ BRONZE DATA\ndf = spark.read.csv(\n    \"s3://ttn-de-bootcamp-bronze-us-east-1/7002_mohammad_farhan_bronze/fuel_transactions/\",\n    header=True\n)\n\n# CLEAN + TRANSFORM\ndf = df.withColumn(\n    \"event_time\",\n    to_timestamp(col(\"timestamp\"))\n).withColumn(\n    \"fuel_liters\",\n    col(\"fuel_liters\").cast(\"double\")\n).withColumn(\n    \"odometer_reading\",\n    col(\"odometer_reading\").cast(\"double\")\n).withColumn(\n    \"date\",\n    to_date(col(\"timestamp\"))\n)\n\n# REMOVE BAD RECORDS\ndf = df.filter(\n    (col(\"vin\").isNotNull()) &\n    (col(\"fuel_liters\").isNotNull()) &\n    (col(\"odometer_reading\").isNotNull())\n)\n\n# DEDUPLICATE\ndf = df.dropDuplicates([\"transaction_id\"])\n\n# WRITE TO SILVER\ndf.write.mode(\"overwrite\").parquet(\n    \"s3://ttn-de-bootcamp-silver-us-east-1/farhan_silver/fuel_transactions/\"\n)\n\njob.commit()"
+}

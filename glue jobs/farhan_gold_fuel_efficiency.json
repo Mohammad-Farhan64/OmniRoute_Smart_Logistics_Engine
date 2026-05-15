@@ -1,0 +1,49 @@
+{
+	"jobConfig": {
+		"name": "farhan_gold_fuel_efficiency",
+		"description": "",
+		"role": "arn:aws:iam::537124955775:role/bootcamp-poc-farhan",
+		"command": "glueetl",
+		"version": "5.1",
+		"runtime": null,
+		"workerType": "G.1X",
+		"numberOfWorkers": 10,
+		"maxCapacity": 10,
+		"jobRunQueuingEnabled": false,
+		"maxRetries": 0,
+		"timeout": 480,
+		"maxConcurrentRuns": 1,
+		"security": "none",
+		"scriptName": "farhan_gold_fuel_efficiency.py",
+		"scriptLocation": "s3://ttn-de-bootcamp-silver-us-east-1/farhan_silver/scripts/",
+		"language": "python-3",
+		"spark": true,
+		"sparkConfiguration": "standard",
+		"jobParameters": [
+			{
+				"key": "--conf",
+				"value": "spark.eventLog.rolling.enabled=true",
+				"existing": false
+			}
+		],
+		"tags": [],
+		"jobMode": "DEVELOPER_MODE",
+		"createdOn": "2026-05-05T12:14:57.952Z",
+		"developerMode": true,
+		"connectionsList": [],
+		"temporaryDirectory": "s3://ttn-de-bootcamp-silver-us-east-1/farhan_silver/temp_path/",
+		"logging": true,
+		"glueHiveMetastore": true,
+		"etlAutoTuning": true,
+		"metrics": true,
+		"observabilityMetrics": true,
+		"bookmark": "job-bookmark-disable",
+		"sparkPath": "s3://ttn-de-bootcamp-silver-us-east-1/farhan_silver/logs/",
+		"flexExecution": false,
+		"minFlexWorkers": null,
+		"maintenanceWindow": null
+	},
+	"hasBeenSaved": false,
+	"usageProfileName": null,
+	"script": "# farhan_gold_fuel_efficiency\n\nimport sys\nfrom pyspark.context import SparkContext\nfrom awsglue.context import GlueContext\nfrom awsglue.job import Job\nfrom awsglue.utils import getResolvedOptions\nfrom pyspark.sql.functions import *\nfrom pyspark.sql.window import Window\n\nargs = getResolvedOptions(sys.argv, ['JOB_NAME'])\n\n# Init\nsc = SparkContext()\nglueContext = GlueContext(sc)\nspark = glueContext.spark_session\n\njob = Job(glueContext)\njob.init(args['JOB_NAME'], args)\n\n# -----------------------------\n# READ SILVER DATA\n# -----------------------------\nfuel_df = spark.read.parquet(\n    \"s3://ttn-de-bootcamp-silver-us-east-1/farhan_silver/fuel_transactions/\"\n)\n\nregistry_df = spark.read.parquet(\n    \"s3://ttn-de-bootcamp-silver-us-east-1/farhan_silver/vehicle_registry/\"\n)\n\nmaintenance_df = spark.read.parquet(\n    \"s3://ttn-de-bootcamp-silver-us-east-1/farhan_silver/maintenance_logs/\"\n)\n\n# -----------------------------\n# CLEAN + PREP\n# -----------------------------\nfuel_df = fuel_df.withColumn(\"event_time\", to_timestamp(\"event_time\")) \\\n                 .withColumn(\"date\", to_date(\"event_time\"))\n\n# -----------------------------\n# DISTANCE CALCULATION\n# -----------------------------\nwindow_spec = Window.partitionBy(\"vin\").orderBy(\"event_time\")\n\nfuel_df = fuel_df.withColumn(\"prev_odo\", lag(\"odometer_reading\").over(window_spec)) \\\n                 .withColumn(\"distance\", col(\"odometer_reading\") - col(\"prev_odo\"))\n\nfuel_df = fuel_df.filter(col(\"distance\").isNotNull())\n\n# -----------------------------\n# KMPL\n# -----------------------------\nfuel_df = fuel_df.withColumn(\"kmpl\", col(\"distance\") / col(\"fuel_liters\"))\n\n# -----------------------------\n# JOIN VEHICLE REGISTRY\n# -----------------------------\nfuel_df = fuel_df.join(registry_df.select(\"vin\", \"model\"), \"vin\", \"left\")\n\n# -----------------------------\n# REMOVE MAINTENANCE DAYS\n# -----------------------------\nmaintenance_df = maintenance_df.withColumn(\"service_date\", to_date(\"service_date\"))\n\nfuel_df = fuel_df.join(\n    maintenance_df.select(\"vin\", col(\"service_date\").alias(\"date\")),\n    [\"vin\", \"date\"],\n    \"left_anti\"\n)\n\n# -----------------------------\n# REMOVE WEEKENDS\n# -----------------------------\nfuel_df = fuel_df.withColumn(\"day_of_week\", dayofweek(\"date\"))\n\nfuel_df = fuel_df.filter(~col(\"day_of_week\").isin([1, 7]))\n\n# -----------------------------\n# BASELINE\n# -----------------------------\nbaseline_df = fuel_df.groupBy(\"model\") \\\n                    .agg(avg(\"kmpl\").alias(\"baseline_kmpl\"))\n\n# -----------------------------\n# FLAGGING\n# -----------------------------\nfuel_df = fuel_df.join(baseline_df, \"model\")\n\nfuel_df = fuel_df.withColumn(\n    \"threshold\",\n    col(\"baseline_kmpl\") * 0.88\n)\n\nfuel_df = fuel_df.withColumn(\n    \"status\",\n    when(col(\"kmpl\") < col(\"threshold\"), \"FLAGGED\").otherwise(\"OK\")\n)\n\n# -----------------------------\n# FINAL OUTPUT\n# -----------------------------\nfinal_df = fuel_df.select(\n    \"vin\",\n    \"model\",\n    col(\"date\").alias(\"audit_date\"),\n    \"kmpl\",\n    \"baseline_kmpl\",\n    \"status\"\n)\n\n# -----------------------------\n# WRITE TO GOLD\n# -----------------------------\nfinal_df.write.mode(\"overwrite\").parquet(\n    \"s3://ttn-de-bootcamp-gold-us-east-1/farhan_gold/fuel_efficiency_audit/\"\n)\n\njob.commit()"
+}
